@@ -2781,7 +2781,9 @@ class Abstract_Wallet(ABC, Logger, EventListener):
         self._update_password_for_keystore(old_pw, new_pw)
         encrypt_keystore = self.can_have_keystore_encryption()
         self.db.set_keystore_encryption(bool(new_pw) and encrypt_keystore)
-        self.save_db()
+        ## save changes
+        if self.storage and self.storage.file_exists():
+            self.db._write(self.storage)
 
     @abstractmethod
     def _update_password_for_keystore(self, old_pw: Optional[str], new_pw: Optional[str]) -> None:
@@ -3634,6 +3636,9 @@ class Wallet(object):
         wallet_type = db.get('wallet_type')
         WalletClass = Wallet.wallet_class(wallet_type)
         wallet = WalletClass(db, storage, config=config)
+        # if file exists, consolidate pending changes
+        if storage and storage.file_exists() and db.pending_changes:
+            db._write(storage)
         return wallet
 
     @staticmethod

@@ -34,6 +34,7 @@ import binascii
 import time
 
 import attr
+import jsonpatch
 
 from . import util, bitcoin
 from .util import profiler, WalletFileException, multisig_type, TxMinedInfo, bfh
@@ -117,7 +118,8 @@ class WalletDB(JsonDB):
 
     def load_data(self, s):
         try:
-            self.data = json.loads(s)
+            data = json.loads('[' + s + ']')
+            self.data, patches = data[0], data[1:]
         except Exception:
             try:
                 d = ast.literal_eval(s)
@@ -125,6 +127,7 @@ class WalletDB(JsonDB):
             except Exception as e:
                 raise WalletFileException("Cannot read wallet file. (parsing failed)")
             self.data = {}
+            patches = []
             for key, value in d.items():
                 try:
                     json.dumps(key)
@@ -135,12 +138,16 @@ class WalletDB(JsonDB):
                 self.data[key] = value
         if not isinstance(self.data, dict):
             raise WalletFileException("Malformed wallet file (not dict)")
-
+        # apply patches
+        self.logger.info('found %d patches'%len(patches))
+        patch = jsonpatch.JsonPatch(patches)
+        self.data = patch.apply(self.data)
+        self.set_modified(True)
         if not self._manual_upgrades and self.requires_split():
             raise WalletFileException("This wallet has multiple accounts and must be split")
-
         if not self.requires_upgrade():
             self._after_upgrade_tasks()
+            assert self.pending_changes == []
         elif not self._manual_upgrades:
             self.upgrade()
 
@@ -1584,7 +1591,20 @@ class WalletDB(JsonDB):
 
     def write(self, storage: 'WalletStorage'):
         with self.lock:
-            self._write(storage)
+            if storage.file_exists():
+                self._append_pending_changes(storage)
+            else:
+                self._write(storage)
+
+    def _append_pending_changes(self, storage):
+        if threading.currentThread().isDaemon():
+            self.logger.warning('daemon thread cannot write db')
+            return
+        if not self.pending_changes:
+            return
+        s = ''.join([',\n' + x for x in self.pending_changes])
+        storage.append(s)
+        self.pending_changes = []
 
     @profiler
     def _write(self, storage: 'WalletStorage'):
@@ -1595,6 +1615,7 @@ class WalletDB(JsonDB):
             return
         json_str = self.dump(human_readable=not storage.is_encrypted())
         storage.write(json_str)
+        self.pending_changes = []
         self.set_modified(False)
 
     def is_ready_to_be_used_by_wallet(self):
