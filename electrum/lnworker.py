@@ -674,6 +674,10 @@ class LNWallet(LNWorker):
         # hold invoices
         self.hold_invoice_callbacks = {}
 
+        # bundles
+        self.payment_bundles = [] # lists of hashes. todo:persist
+        self.payment_bundle_ready_parts = set() # hashes
+
     def has_deterministic_node_id(self) -> bool:
         return bool(self.db.get('lightning_xprv'))
 
@@ -1857,6 +1861,28 @@ class LNWallet(LNWorker):
             self.wallet.save_db()
         return payment_hash
 
+    def bundle_payments(self, hash_list):
+        self.payment_bundles.append(hash_list)
+
+    def get_payment_bundle(self, payment_hash):
+        for hash_list in self.payment_bundles:
+            if payment_hash in hash_list:
+                return hash_list
+
+    def is_part_of_bundle(self, payment_hash):
+        return bool(self.get_payment_bundle(payment_hash))
+
+    def set_bundle_part_ready(self, payment_hash):
+        self.payment_bundle_ready_parts.add(payment_hash)
+
+    def is_bundle_ready(self, payment_hash):
+        l = self.get_payment_bundle(payment_hash)
+        return all([x in self.payment_bundle_ready_parts for x in l])
+
+    def is_bundle_expired(self, payment_hash):
+        # TODO
+        return False
+
     def save_preimage(self, payment_hash: bytes, preimage: bytes, *, write_to_disk: bool = True):
         assert sha256(preimage) == payment_hash
         self.preimages[payment_hash.hex()] = preimage.hex()
@@ -1895,14 +1921,21 @@ class LNWallet(LNWorker):
     def check_received_htlc(self, payment_secret, short_channel_id, htlc: UpdateAddHtlc, expected_msat: int) -> Optional[bool]:
         """ return MPP status: True (accepted), False (expired) or None (waiting)
         """
-
         payment_hash = htlc.payment_hash
+
         preimage = self.get_preimage(payment_hash)
         if not preimage:
             callback = self.hold_invoice_callbacks.get(payment_hash)
             if callback:
                 callback(payment_hash)
             return None
+
+        if self.is_part_of_bundle(payment_hash):
+            self.set_bundle_part_ready(payment_hash)
+            if self.is_bundle_expired(payment_hash):
+                return False
+            if not self.is_bundle_ready(htlc.payment_hash):
+                return None
 
         amt_to_forward = htlc.amount_msat # check this
         if amt_to_forward >= expected_msat:
