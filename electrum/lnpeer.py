@@ -1790,15 +1790,6 @@ class Peer(Logger):
             # TODO fail here if invoice has set PAYMENT_SECRET_REQ
             payment_secret_from_onion = None
 
-        if total_msat > amt_to_forward:
-            mpp_status = self.lnworker.check_received_mpp_htlc(payment_secret_from_onion, chan.short_channel_id, htlc, total_msat)
-            if mpp_status is None:
-                return None, None
-            if mpp_status is False:
-                log_fail_reason(f"MPP_TIMEOUT")
-                raise OnionRoutingFailure(code=OnionFailureCode.MPP_TIMEOUT, data=b'')
-            assert mpp_status is True
-
         # if there is a trampoline_onion, maybe_fulfill_htlc will be called again
         if processed_onion.trampoline_onion_packet:
             # TODO: we should check that all trampoline_onions are the same
@@ -1810,6 +1801,7 @@ class Peer(Logger):
         if info is None:
             log_fail_reason(f"no payment_info found for RHASH {htlc.payment_hash.hex()}")
             raise exc_incorrect_or_unknown_pd
+
         preimage = self.lnworker.get_preimage(htlc.payment_hash)
         if payment_secret_from_onion:
             expected_payment_secrets = [self.lnworker.get_payment_secret(htlc.payment_hash)]
@@ -1819,10 +1811,21 @@ class Peer(Logger):
             if payment_secret_from_onion not in expected_payment_secrets:
                 log_fail_reason(f'incorrect payment secret {payment_secret_from_onion.hex()} != {expected_payment_secrets[0].hex()}')
                 raise exc_incorrect_or_unknown_pd
+
+        payment_status = self.lnworker.check_received_htlc(payment_secret_from_onion, chan.short_channel_id, htlc, total_msat)
+        if payment_status is None:
+            return None, None
+        elif payment_status is False:
+            log_fail_reason(f"MPP_TIMEOUT")
+            raise OnionRoutingFailure(code=OnionFailureCode.MPP_TIMEOUT, data=b'')
+        else:
+            assert payment_status is True
+
         invoice_msat = info.amount_msat
         if not (invoice_msat is None or invoice_msat <= total_msat <= 2 * invoice_msat):
             log_fail_reason(f"total_msat={total_msat} too different from invoice_msat={invoice_msat}")
             raise exc_incorrect_or_unknown_pd
+
         self.logger.info(f"maybe_fulfill_htlc. will FULFILL HTLC: chan {chan.short_channel_id}. htlc={str(htlc)}")
         self.lnworker.set_request_status(htlc.payment_hash, PR_PAID)
         return preimage, None
